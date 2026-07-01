@@ -1,0 +1,279 @@
+// Prisma schema for Logistics SaaS Database
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id          String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  name        String   @db.NVarChar(255)
+  is_active   Boolean? @default(true) @db.Bit
+  metadata    String?  @db.NVarChar(Max)
+  created_at  DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at  DateTime? @db.DateTime2
+
+  // Relations
+  addresses         CompanyAddress[]
+  gstRegistrations  CompanyGstRegistration[]
+  users             UserAccount[]
+  vehicles          Vehicle[]
+  drivers           Driver[]
+  trips             Trip[]
+  expenses          Expense[]
+  invoices          Invoice[]
+  roles             SecurityRole[]
+  auditLogs         SecurityAuditLog[]
+
+  @@map("Company")
+}
+
+model CompanyAddress {
+  id             String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id     String   @db.UniqueIdentifier
+  address_line_1 String   @db.NVarChar(255)
+  address_line_2 String?  @db.NVarChar(255)
+  city           String   @db.NVarChar(100)
+  state          String   @db.NVarChar(100)
+  pincode        String   @db.NVarChar(20)
+  country        String?  @default("India") @db.NVarChar(100)
+  address_type   String?  @db.NVarChar(50)
+  is_default     Boolean? @default(false) @db.Bit
+  created_at     DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at     DateTime? @db.DateTime2
+
+  // Relations
+  company     Company                  @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  gstRegistrations CompanyGstRegistration[]
+  invoices    Invoice[]
+
+  @@unique([company_id, address_line_1, city, pincode])
+  @@map("CompanyAddress")
+}
+
+model CompanyGstRegistration {
+  id         String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id String   @db.UniqueIdentifier
+  address_id String   @db.UniqueIdentifier
+  gst_number String   @db.NVarChar(20)
+  legal_name String   @db.NVarChar(255)
+  is_active  Boolean? @default(true) @db.Bit
+  is_default Boolean? @default(false) @db.Bit
+  created_at DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at DateTime? @db.DateTime2
+
+  // Relations
+  company Company        @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  address CompanyAddress @relation(fields: [address_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  invoices Invoice[]
+
+  @@unique([company_id, gst_number])
+  @@map("CompanyGstRegistration")
+}
+
+model UserAccount {
+  id             String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id     String   @db.UniqueIdentifier
+  email          String   @db.NVarChar(255)
+  full_name      String   @db.NVarChar(150)
+  password_hash  String   @db.NVarChar(255)
+  role           String   @db.NVarChar(50)
+  is_active      Boolean? @default(true) @db.Bit
+  last_login_at  DateTime? @db.DateTime2
+  metadata       String?  @db.NVarChar(Max)
+  created_at     DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at     DateTime? @db.DateTime2
+
+  // Relations
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userRoles UserRole[]
+  roleAuditLogs SecurityAuditLog[]
+
+  @@unique([company_id, email])
+  @@map("UserAccount")
+}
+
+model SecurityRole {
+  id             String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id     String   @db.UniqueIdentifier
+  role_name      String   @db.NVarChar(100)
+  description    String?  @db.NVarChar(500)
+  is_system_role Boolean  @default(false) @db.Bit
+  is_active      Boolean  @default(true) @db.Bit
+  created_by     String?  @db.UniqueIdentifier
+  created_at     DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_by     String?  @db.UniqueIdentifier
+  updated_at     DateTime? @db.DateTime2
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  rolePermissions RolePermission[]
+  userRoles UserRole[]
+
+  @@unique([company_id, role_name])
+  @@map("Roles")
+}
+
+model SecurityPermission {
+  id          String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  module_key  String   @db.NVarChar(100)
+  module_name String   @db.NVarChar(150)
+  action      String   @db.NVarChar(50)
+  description String?  @db.NVarChar(500)
+
+  rolePermissions RolePermission[]
+
+  @@unique([module_key, action])
+  @@map("Permissions")
+}
+
+model RolePermission {
+  id            String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  role_id       String   @db.UniqueIdentifier
+  permission_id String   @db.UniqueIdentifier
+  allowed       Boolean  @default(false) @db.Bit
+
+  role SecurityRole @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  permission SecurityPermission @relation(fields: [permission_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([role_id, permission_id])
+  @@map("RolePermissions")
+}
+
+model UserRole {
+  id      String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  user_id String   @db.UniqueIdentifier
+  role_id String   @db.UniqueIdentifier
+
+  user UserAccount @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  role SecurityRole @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([user_id, role_id])
+  @@map("UserRoles")
+}
+
+model SecurityAuditLog {
+  id            String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id    String   @db.UniqueIdentifier
+  actor_user_id String?  @db.UniqueIdentifier
+  action        String   @db.NVarChar(100)
+  entity_type   String   @db.NVarChar(100)
+  entity_id     String?  @db.UniqueIdentifier
+  metadata      String?  @db.NVarChar(Max)
+  created_at    DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  actor UserAccount? @relation(fields: [actor_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([company_id, created_at])
+  @@map("SecurityAuditLogs")
+}
+
+model Vehicle {
+  id                  String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id          String   @db.UniqueIdentifier
+  registration_number String   @db.NVarChar(50)
+  vehicle_type        String?  @db.NVarChar(50)
+  capacity_tons       Decimal? @db.Decimal(5, 2)
+  is_active           Boolean? @default(true) @db.Bit
+  metadata            String?  @db.NVarChar(Max)
+  created_at          DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at          DateTime? @db.DateTime2
+
+  // Relations
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  trips   Trip[]
+
+  @@unique([company_id, registration_number])
+  @@map("Vehicle")
+}
+
+model Driver {
+  id             String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id     String   @db.UniqueIdentifier
+  full_name      String   @db.NVarChar(150)
+  phone          String   @db.NVarChar(20)
+  license_number String?  @db.NVarChar(50)
+  is_active      Boolean? @default(true) @db.Bit
+  metadata       String?  @db.NVarChar(Max)
+  created_at     DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at     DateTime? @db.DateTime2
+
+  // Relations
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  trips   Trip[]
+
+  @@unique([company_id, phone])
+  @@map("Driver")
+}
+
+model Trip {
+  id                String    @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id        String    @db.UniqueIdentifier
+  vehicle_id        String    @db.UniqueIdentifier
+  driver_id         String    @db.UniqueIdentifier
+  source            String    @db.NVarChar(255)
+  destination       String    @db.NVarChar(255)
+  start_date        DateTime  @db.Date
+  end_date          DateTime? @db.Date
+  status            String    @db.NVarChar(50)
+  total_distance_km Decimal?  @db.Decimal(8, 2)
+  freight_amount    Decimal?  @db.Decimal(10, 2)
+  metadata          String?   @db.NVarChar(Max)
+  created_at        DateTime  @default(dbgenerated("sysdatetime()")) @db.DateTime2
+  updated_at        DateTime? @db.DateTime2
+
+  // Relations
+  company Company   @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  vehicle Vehicle   @relation(fields: [vehicle_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  driver  Driver    @relation(fields: [driver_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  expenses Expense[]
+  invoices Invoice[]
+
+  @@map("Trip")
+}
+
+model Expense {
+  id           String    @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id   String    @db.UniqueIdentifier
+  trip_id      String?   @db.UniqueIdentifier
+  expense_type String    @db.NVarChar(50)
+  amount       Decimal   @db.Decimal(10, 2)
+  expense_date DateTime  @db.Date
+  notes        String?   @db.NVarChar(255)
+  created_at   DateTime  @default(dbgenerated("sysdatetime()")) @db.DateTime2
+
+  // Relations
+  company Company @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  trip    Trip?   @relation(fields: [trip_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@map("Expense")
+}
+
+model Invoice {
+  id                   String   @id @default(dbgenerated("newid()")) @db.UniqueIdentifier
+  company_id           String   @db.UniqueIdentifier
+  trip_id              String   @db.UniqueIdentifier
+  gst_registration_id  String   @db.UniqueIdentifier
+  billing_address_id   String   @db.UniqueIdentifier
+  invoice_number       String   @db.NVarChar(50)
+  amount               Decimal  @db.Decimal(10, 2)
+  cgst                 Decimal? @db.Decimal(10, 2)
+  sgst                 Decimal? @db.Decimal(10, 2)
+  igst                 Decimal? @db.Decimal(10, 2)
+  invoice_date         DateTime @db.Date
+  due_date             DateTime? @db.Date
+  status               String   @db.NVarChar(50)
+  created_at           DateTime @default(dbgenerated("sysdatetime()")) @db.DateTime2
+
+  // Relations
+  company         Company                 @relation(fields: [company_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  trip            Trip                    @relation(fields: [trip_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  gstRegistration CompanyGstRegistration  @relation(fields: [gst_registration_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  billingAddress  CompanyAddress          @relation(fields: [billing_address_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([company_id, invoice_number])
+  @@map("Invoice")
+}
