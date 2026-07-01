@@ -1,6 +1,6 @@
 import { BaseRepository } from '../repositories/base/BaseRepository';
 import { EffectivePermission, RolePermissionInput, SecurityPermission, SecurityRole, UserRoleRow } from '../models/security';
-import { DEFAULT_SYSTEM_ROLES, MODULE_REGISTRY, RBAC_ACTIONS, SUPER_ADMIN_ROLE } from '../security/moduleRegistry';
+import { DEFAULT_SYSTEM_ROLES, MODULE_REGISTRY, RBAC_ACTIONS, SUPER_ADMIN_ROLE, flattenPermissionRegistry } from '../security/moduleRegistry';
 
 export class SecurityService extends BaseRepository {
   private static schemaEnsured = false;
@@ -264,7 +264,14 @@ export class SecurityService extends BaseRepository {
        WHERE ur.user_id = @userId AND p.module_key = @moduleKey AND p.action = @action`,
       { companyId, userId, moduleKey, action }
     );
-    return rows.length > 0;
+    if (rows.length > 0) return true;
+
+    if (legacyRole) {
+      const fallbackRole = this.normalizeLegacyRole(legacyRole);
+      if (fallbackRole === SUPER_ADMIN_ROLE) return true;
+    }
+
+    return false;
   }
 
   async getAuditLogs(companyId: string) {
@@ -366,20 +373,23 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
   }
 
   private async isSeeded(companyId: string): Promise<boolean> {
-    const expectedPermissionCount = MODULE_REGISTRY.length * RBAC_ACTIONS.length;
+    const expectedPermissionCount = flattenPermissionRegistry().length * RBAC_ACTIONS.length;
     const rows = await this.executeQuery<{ permission_count: number; role_count: number }>(
       `SELECT
          (SELECT COUNT(1) FROM Permissions) AS permission_count,
-         (SELECT COUNT(1) FROM Roles WHERE company_id = @companyId AND role_name IN ('Super Admin', 'Admin', 'Transporter')) AS role_count`,
+         (SELECT COUNT(1) FROM Roles WHERE company_id = @companyId AND role_name IN ('superadmin', 'admin', 'accountant', 'user')) AS role_count`,
       { companyId }
     );
 
     const row = rows[0];
-    return Boolean(row && row.permission_count >= expectedPermissionCount && row.role_count >= DEFAULT_SYSTEM_ROLES.length);
+    if (!row || row.permission_count < expectedPermissionCount || row.role_count < DEFAULT_SYSTEM_ROLES.length) return false;
+
+    await this.seedLegacyUserRoleAssignments(companyId);
+    return true;
   }
 
   private async seedPermissions(): Promise<void> {
-    for (const module of MODULE_REGISTRY) {
+    for (const module of flattenPermissionRegistry()) {
       for (const action of RBAC_ACTIONS) {
         await this.executeNonQuery(
           `MERGE Permissions AS target
@@ -413,6 +423,7 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
     }
 
     await this.seedDefaultRolePermissions(companyId);
+    await this.seedLegacyUserRoleAssignments(companyId);
   }
 
   private async seedDefaultRolePermissions(companyId: string): Promise<void> {
@@ -421,9 +432,11 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
 
     const rolePermissionRules: Record<string, (permission: SecurityPermission) => boolean> = {
       [SUPER_ADMIN_ROLE]: () => true,
-      Admin: () => true,
-      Transporter: (permission) => ['DASHBOARD', 'DRIVERS', 'VEHICLES', 'TRIPS', 'TRANSPORT'].includes(permission.module_key)
-        && ['VIEW', 'CREATE', 'UPDATE', 'EXPORT', 'PRINT'].includes(permission.action),
+      admin: (permission) => !permission.module_key.startsWith('system.settings'),
+      accountant: (permission) => permission.module_key.startsWith('finance.') || (
+        permission.action === 'read' && ['dashboard.overview', 'users.user_management'].includes(permission.module_key)
+      ),
+      user: (permission) => permission.action === 'read' && ['dashboard.overview'].includes(permission.module_key),
     };
 
     for (const role of roles) {
@@ -437,6 +450,54 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
         );
       }
     }
+  }
+
+  private async seedLegacyUserRoleAssignments(companyId: string): Promise<void> {
+    const roles = await this.getRolesWithoutSeed(companyId);
+    const roleByName = new Map(roles.map((role) => [role.role_name, role]));
+    const users = await this.executeQuery<{ id: string; role: string }>(
+      `SELECT id, role FROM UserAccount WHERE company_id = @companyId`,
+      { companyId }
+    );
+
+    for (const user of users) {
+      const existingDefaultRole = await this.executeQuery<{ count: number }>(
+        `SELECT COUNT(1) AS count
+         FROM UserRoles ur
+         INNER JOIN Roles r ON r.id = ur.role_id
+         WHERE ur.user_id = @userId
+           AND r.company_id = @companyId
+           AND r.role_name IN ('superadmin', 'admin', 'accountant', 'user')`,
+        { userId: user.id, companyId }
+      );
+      if ((existingDefaultRole[0]?.count || 0) > 0) continue;
+
+      const existingRoles = await this.executeQuery<{ role_name: string }>(
+        `SELECT r.role_name
+         FROM UserRoles ur
+         INNER JOIN Roles r ON r.id = ur.role_id
+         WHERE ur.user_id = @userId AND r.company_id = @companyId`,
+        { userId: user.id, companyId }
+      );
+      const roleSource = existingRoles[0]?.role_name || user.role;
+
+      const mappedRole = this.normalizeLegacyRole(roleSource);
+      const role = roleByName.get(mappedRole);
+      if (!role) continue;
+
+      await this.executeNonQuery(
+        `INSERT INTO UserRoles (user_id, role_id) VALUES (@userId, @roleId)`,
+        { userId: user.id, roleId: role.id }
+      );
+    }
+  }
+
+  private normalizeLegacyRole(role?: string | null): string {
+    const normalized = (role || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+    if (['owner', 'superadmin', 'superadministrator'].includes(normalized)) return 'superadmin';
+    if (['admin', 'administrator', 'manager', 'transporter', 'transportmanager'].includes(normalized)) return 'admin';
+    if (['accountant', 'accounts', 'finance'].includes(normalized)) return 'accountant';
+    return 'user';
   }
 
   private async getRolesWithoutSeed(companyId: string): Promise<SecurityRole[]> {

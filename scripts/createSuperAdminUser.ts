@@ -62,7 +62,7 @@ async function main() {
   await connectDB();
   const securityService = new SecurityService();
   await securityService.ensureSecuritySeed(companyId, userId);
-  await securityService.assignSystemRoleByName(companyId, userId, 'Super Admin', userId);
+  await securityService.assignSystemRoleByName(companyId, userId, 'superadmin', userId);
 
   console.log('Super Admin user ready');
   console.log(`Email: ${email}`);

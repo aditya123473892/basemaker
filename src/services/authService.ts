@@ -35,7 +35,7 @@ export class AuthService {
       });
 
       await this.securityService.ensureSecuritySeed(user.company_id, user.id);
-      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'Super Admin', user.id);
+      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'superadmin', user.id);
 
       // Generate JWT
       const token = this.generateToken({
@@ -119,11 +119,13 @@ export class AuthService {
   private async assignLegacyRole(user: AuthUser) {
     const normalizedRole = user.role.toUpperCase();
     if (['OWNER', 'SUPERADMIN', 'SUPER_ADMIN'].includes(normalizedRole)) {
-      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'Super Admin', user.id);
-    } else if (normalizedRole === 'ADMIN') {
-      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'Admin', user.id);
-    } else if (['TRANSPORTER', 'TRANSPORT_MANAGER'].includes(normalizedRole)) {
-      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'Transporter', user.id);
+      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'superadmin', user.id);
+    } else if (['ADMIN', 'TRANSPORTER', 'TRANSPORT_MANAGER'].includes(normalizedRole)) {
+      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'admin', user.id);
+    } else if (['ACCOUNTANT', 'ACCOUNTS', 'FINANCE'].includes(normalizedRole)) {
+      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'accountant', user.id);
+    } else {
+      await this.securityService.assignSystemRoleByName(user.company_id, user.id, 'user', user.id);
     }
   }
 }

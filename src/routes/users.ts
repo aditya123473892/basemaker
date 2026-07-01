@@ -10,18 +10,18 @@ const userController = new UserController();
 router.use(AuthMiddleware.authenticate);
 
 // GET /api/users - Get all users for the company
-router.get('/', requirePermission('USERS', 'VIEW'), (req, res, next) => userController.getAllUsers(req, res, next));
+router.get('/', requirePermission('users.user_management', 'read'), (req, res, next) => userController.getAllUsers(req, res, next));
 
 // GET /api/users/:id - Get user by ID
-router.get('/:id', requirePermission('USERS', 'VIEW'), (req, res, next) => userController.getUserById(req, res, next));
+router.get('/:id', requirePermission('users.user_management', 'read'), (req, res, next) => userController.getUserById(req, res, next));
 
 // POST /api/users - Create a new user
-router.post('/', requirePermission('USERS', 'CREATE'), (req, res, next) => userController.createUser(req, res, next));
+router.post('/', requirePermission('users.user_management', 'create'), (req, res, next) => userController.createUser(req, res, next));
 
 // PUT /api/users/:id - Update user
-router.put('/:id', requirePermission('USERS', 'UPDATE'), (req, res, next) => userController.updateUser(req, res, next));
+router.put('/:id', requirePermission('users.user_management', 'update'), (req, res, next) => userController.updateUser(req, res, next));
 
 // DELETE /api/users/:id - Delete user (soft delete)
-router.delete('/:id', requirePermission('USERS', 'DELETE'), (req, res, next) => userController.deleteUser(req, res, next));
+router.delete('/:id', requirePermission('users.user_management', 'delete'), (req, res, next) => userController.deleteUser(req, res, next));
 
 module.exports = router;

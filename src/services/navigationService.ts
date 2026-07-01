@@ -91,30 +91,156 @@ CREATE TABLE SidebarMenus (
     NavigationService.sidebarSchemaEnsured = true;
   }
 
+  async getAllMenus(companyId: string): Promise<SidebarMenuRow[]> {
+    await this.ensureSidebarSchema();
+    return this.executeQuery<SidebarMenuRow>(
+      `SELECT id, parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order, is_active
+       FROM SidebarMenus
+       ORDER BY parent_id, sort_order, label`
+    );
+  }
+
+  async createMenu(companyId: string, data: {
+    label: string;
+    path?: string | null;
+    iconKey?: string | null;
+    permissionModuleKey?: string | null;
+    permissionAction?: string | null;
+    parentId?: string | null;
+    sortOrder?: number;
+  }): Promise<SidebarMenuRow> {
+    await this.ensureSidebarSchema();
+
+    const id = await this.executeScalar<string>(
+      `INSERT INTO SidebarMenus (label, path, icon_key, permission_module_key, permission_action, parent_id, sort_order)
+       OUTPUT inserted.id
+       VALUES (@label, @path, @iconKey, @permissionModuleKey, @permissionAction, @parentId, @sortOrder)`,
+      {
+        label: data.label,
+        path: data.path ?? null,
+        iconKey: data.iconKey ?? null,
+        permissionModuleKey: data.permissionModuleKey ?? null,
+        permissionAction: data.permissionAction ?? null,
+        parentId: data.parentId ?? null,
+        sortOrder: data.sortOrder ?? 0,
+      }
+    );
+
+    const row = await this.executeQuery<SidebarMenuRow>(
+      `SELECT id, parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order, is_active
+       FROM SidebarMenus
+       WHERE id = @id`,
+      { id }
+    );
+    return row[0];
+  }
+
+  async updateMenu(companyId: string, id: string, data: {
+    label?: string;
+    path?: string | null;
+    iconKey?: string | null;
+    permissionModuleKey?: string | null;
+    permissionAction?: string | null;
+    parentId?: string | null;
+    sortOrder?: number;
+    isActive?: boolean;
+  }): Promise<SidebarMenuRow> {
+    await this.ensureSidebarSchema();
+
+    const row = await this.executeQuery<SidebarMenuRow>(
+      `SELECT id, parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order, is_active
+       FROM SidebarMenus
+       WHERE id = @id`,
+      { id }
+    );
+    if (!row[0]) throw new Error('Menu not found');
+
+    await this.executeNonQuery(
+      `UPDATE SidebarMenus
+       SET label = COALESCE(@label, label),
+           path = @path,
+           icon_key = @iconKey,
+           permission_module_key = @permissionModuleKey,
+           permission_action = @permissionAction,
+           parent_id = @parentId,
+           sort_order = COALESCE(@sortOrder, sort_order),
+           is_active = COALESCE(@isActive, is_active),
+           updated_at = sysdatetime()
+       WHERE id = @id`,
+      {
+        id,
+        label: data.label ?? null,
+        path: data.path ?? null,
+        iconKey: data.iconKey ?? null,
+        permissionModuleKey: data.permissionModuleKey ?? null,
+        permissionAction: data.permissionAction ?? null,
+        parentId: data.parentId ?? null,
+        sortOrder: data.sortOrder,
+        isActive: data.isActive,
+      }
+    );
+
+    const updated = await this.executeQuery<SidebarMenuRow>(
+      `SELECT id, parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order, is_active
+       FROM SidebarMenus
+       WHERE id = @id`,
+      { id }
+    );
+    return updated[0];
+  }
+
+  async deleteMenu(companyId: string, id: string): Promise<void> {
+    await this.ensureSidebarSchema();
+    await this.executeNonQuery(`DELETE FROM SidebarMenus WHERE id = @id`, { id });
+  }
+
   private async seedDefaultMenus(): Promise<void> {
     if (NavigationService.sidebarSeedChecked) return;
 
     const existing = await this.executeQuery<{ count: number }>(`SELECT COUNT(1) AS count FROM SidebarMenus`);
     if (existing[0]?.count > 0) {
+      await this.executeNonQuery(`
+UPDATE SidebarMenus SET permission_module_key = 'dashboard.overview', permission_action = 'read' WHERE path = '/dashboard';
+UPDATE SidebarMenus SET permission_module_key = 'users.role_management', permission_action = 'read' WHERE path = '/dashboard/security';
+UPDATE SidebarMenus SET path = '/dashboard/user-master', permission_module_key = 'users.user_management', permission_action = 'read' WHERE path IN ('/dashboard/users', '/dashboard/user-master');
+UPDATE SidebarMenus SET permission_module_key = 'transport.drivers', permission_action = 'read' WHERE path = '/dashboard/drivers';
+UPDATE SidebarMenus SET permission_module_key = 'transport.vehicles', permission_action = 'read' WHERE path = '/dashboard/vehicles';
+UPDATE SidebarMenus SET permission_module_key = 'transport.trips', permission_action = 'read' WHERE path = '/dashboard/trips';
+UPDATE SidebarMenus SET permission_module_key = 'finance.reports', permission_action = 'read' WHERE path = '/dashboard/accounts/invoices';
+UPDATE SidebarMenus SET permission_module_key = 'finance.fee_collection', permission_action = 'read' WHERE path = '/dashboard/accounts/payments';`);
       NavigationService.sidebarSeedChecked = true;
       return;
     }
 
     await this.executeNonQuery(`
+DECLARE @userManagementId uniqueidentifier = newid();
+DECLARE @transportId uniqueidentifier = newid();
+DECLARE @routeGroupId uniqueidentifier = newid();
+DECLARE @financeId uniqueidentifier = newid();
+
 INSERT INTO SidebarMenus (label, path, icon_key, permission_module_key, permission_action, sort_order)
 VALUES
-('Dashboard', '/dashboard', 'BarChart3', NULL, NULL, 10),
-('Security', '/dashboard/security', 'Shield', 'SECURITY', 'VIEW', 20)`);
+('Dashboard', '/dashboard', 'BarChart3', 'dashboard.overview', 'read', 5);
 
-    await this.executeNonQuery(`
-DECLARE @accountsId uniqueidentifier = newid();
 INSERT INTO SidebarMenus (id, label, path, icon_key, permission_module_key, permission_action, sort_order)
-VALUES (@accountsId, 'Accounts', NULL, 'Wallet', 'ACCOUNTS', 'VIEW', 30);
+VALUES
+(@userManagementId, 'Users', NULL, 'Users', NULL, NULL, 10),
+(@transportId, 'Transport', NULL, 'Truck', NULL, NULL, 20),
+(@financeId, 'Finance', NULL, 'Wallet', NULL, NULL, 30);
+
+INSERT INTO SidebarMenus (id, parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order)
+VALUES
+(@routeGroupId, @transportId, 'Routes', NULL, 'Route', NULL, NULL, 10);
 
 INSERT INTO SidebarMenus (parent_id, label, path, icon_key, permission_module_key, permission_action, sort_order)
 VALUES
-(@accountsId, 'Invoices', '/dashboard/accounts/invoices', 'FileText', 'ACCOUNTS', 'VIEW', 10),
-(@accountsId, 'Payments', '/dashboard/accounts/payments', 'CreditCard', 'ACCOUNTS', 'VIEW', 20)`);
+(@userManagementId, 'User Management', '/dashboard/user-master', 'User', 'users.user_management', 'read', 10),
+(@userManagementId, 'Role Management', '/dashboard/security', 'Shield', 'users.role_management', 'read', 20),
+(@routeGroupId, 'Trips', '/dashboard/trips', 'Route', 'transport.trips', 'read', 10),
+(@transportId, 'Vehicles', '/dashboard/vehicles', 'Truck', 'transport.vehicles', 'read', 20),
+(@transportId, 'Drivers', '/dashboard/drivers', 'User', 'transport.drivers', 'read', 30),
+(@financeId, 'Fee Collection', '/dashboard/accounts/payments', 'CreditCard', 'finance.fee_collection', 'read', 10),
+(@financeId, 'Reports', '/dashboard/accounts/invoices', 'FileText', 'finance.reports', 'read', 20)`);
     NavigationService.sidebarSeedChecked = true;
   }
 }

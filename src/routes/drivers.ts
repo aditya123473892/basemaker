@@ -10,18 +10,18 @@ const driverController = new DriverController();
 router.use(AuthMiddleware.authenticate);
 
 // GET /api/drivers - Get all drivers for the company
-router.get('/', requirePermission('DRIVERS', 'VIEW'), (req, res, next) => driverController.getAllDrivers(req, res, next));
+router.get('/', requirePermission('transport.drivers', 'read'), (req, res, next) => driverController.getAllDrivers(req, res, next));
 
 // GET /api/drivers/:id - Get driver by ID
-router.get('/:id', requirePermission('DRIVERS', 'VIEW'), (req, res, next) => driverController.getDriverById(req, res, next));
+router.get('/:id', requirePermission('transport.drivers', 'read'), (req, res, next) => driverController.getDriverById(req, res, next));
 
 // POST /api/drivers - Create a new driver
-router.post('/', requirePermission('DRIVERS', 'CREATE'), (req, res, next) => driverController.createDriver(req, res, next));
+router.post('/', requirePermission('transport.drivers', 'create'), (req, res, next) => driverController.createDriver(req, res, next));
 
 // PUT /api/drivers/:id - Update driver
-router.put('/:id', requirePermission('DRIVERS', 'UPDATE'), (req, res, next) => driverController.updateDriver(req, res, next));
+router.put('/:id', requirePermission('transport.drivers', 'update'), (req, res, next) => driverController.updateDriver(req, res, next));
 
 // DELETE /api/drivers/:id - Delete driver (soft delete)
-router.delete('/:id', requirePermission('DRIVERS', 'DELETE'), (req, res, next) => driverController.deleteDriver(req, res, next));
+router.delete('/:id', requirePermission('transport.drivers', 'delete'), (req, res, next) => driverController.deleteDriver(req, res, next));
 
 module.exports = router;
