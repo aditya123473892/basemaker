@@ -1,6 +1,8 @@
 import { BaseRepository } from '../repositories/base/BaseRepository';
 import { EffectivePermission, RolePermissionInput, SecurityPermission, SecurityRole, UserRoleRow } from '../models/security';
 import { DEFAULT_SYSTEM_ROLES, MODULE_REGISTRY, RBAC_ACTIONS, SUPER_ADMIN_ROLE, flattenPermissionRegistry } from '../security/moduleRegistry';
+import { redisCacheService } from './redisCacheService';
+import { emitPermissionChange, PermissionEventType } from '../events/permissionEvents';
 
 export class SecurityService extends BaseRepository {
   private static schemaEnsured = false;
@@ -57,6 +59,14 @@ export class SecurityService extends BaseRepository {
       }
     );
     await this.audit(companyId, actorUserId, 'ROLE_CREATED', 'Role', role.id, { roleName: role.role_name });
+    
+    // Emit event for cache invalidation
+    await emitPermissionChange('role.created', companyId, {
+      roleId: role.id,
+      userId: actorUserId, // This is the actor who made the change
+      metadata: { roleName: role.role_name },
+    });
+    
     return role;
   }
 
@@ -81,6 +91,14 @@ export class SecurityService extends BaseRepository {
       }
     );
     await this.audit(companyId, actorUserId, 'ROLE_UPDATED', 'Role', role.id, { roleName: role.role_name });
+    
+    // Emit event for cache invalidation
+    await emitPermissionChange('role.updated', companyId, {
+      roleId: role.id,
+      userId: actorUserId, // This is the actor who made the change
+      metadata: { roleName: role.role_name },
+    });
+    
     return role;
   }
 
@@ -89,10 +107,23 @@ export class SecurityService extends BaseRepository {
     if (!role) throw new Error('Role not found');
     if (role.is_system_role) throw new Error('System roles cannot be deleted');
 
+    // Get all users with this role before deletion for cache invalidation
+    const usersWithRole = await this.executeQuery<{ user_id: string }>(
+      `SELECT DISTINCT user_id FROM UserRoles WHERE role_id = @roleId`,
+      { roleId }
+    );
+
     await this.executeNonQuery(`DELETE FROM UserRoles WHERE role_id = @roleId`, { roleId });
     await this.executeNonQuery(`DELETE FROM RolePermissions WHERE role_id = @roleId`, { roleId });
     await this.executeNonQuery(`DELETE FROM Roles WHERE id = @roleId AND company_id = @companyId`, { roleId, companyId });
     await this.audit(companyId, actorUserId, 'ROLE_DELETED', 'Role', roleId, { roleName: role.role_name });
+
+    // Emit event for cache invalidation
+    await emitPermissionChange('role.deleted', companyId, {
+      roleId: roleId,
+      userId: actorUserId,
+      metadata: { roleName: role.role_name },
+    });
   }
 
   async getPermissions(companyId: string): Promise<SecurityPermission[]> {
@@ -125,18 +156,34 @@ export class SecurityService extends BaseRepository {
     const role = await this.getRoleById(companyId, roleId);
     if (!role) throw new Error('Role not found');
 
-    for (const item of permissions) {
-      await this.executeNonQuery(
-        `MERGE RolePermissions AS target
-         USING (SELECT @roleId AS role_id, @permissionId AS permission_id) AS source
-         ON target.role_id = source.role_id AND target.permission_id = source.permission_id
-         WHEN MATCHED THEN UPDATE SET allowed = @allowed
-         WHEN NOT MATCHED THEN INSERT (role_id, permission_id, allowed) VALUES (@roleId, @permissionId, @allowed);`,
-        { roleId, permissionId: item.permissionId, allowed: item.allowed }
-      );
+    if (permissions.length === 0) {
+      return this.getRolePermissionMatrix(companyId, roleId);
     }
 
+    // Batch update using a single MERGE statement with UNION ALL for better performance
+    // This reduces N database round-trips to 1
+    const unionValues = permissions
+      .map((item) => `SELECT @roleId AS role_id, '${item.permissionId}' AS permission_id, ${item.allowed ? 1 : 0} AS allowed`)
+      .join(' UNION ALL ');
+
+    const batchQuery = `
+      MERGE RolePermissions AS target
+      USING (${unionValues}) AS source (role_id, permission_id, allowed)
+      ON target.role_id = source.role_id AND target.permission_id = source.permission_id
+      WHEN MATCHED THEN UPDATE SET allowed = source.allowed
+      WHEN NOT MATCHED THEN INSERT (role_id, permission_id, allowed) VALUES (source.role_id, source.permission_id, source.allowed);`;
+
+    await this.executeNonQuery(batchQuery, { roleId });
+
     await this.audit(companyId, actorUserId, 'PERMISSION_CHANGED', 'Role', roleId, { changes: permissions.length });
+
+    // Emit event for cache invalidation
+    await emitPermissionChange('permission.updated', companyId, {
+      roleId: roleId,
+      userId: actorUserId,
+      metadata: { changes: permissions.length },
+    });
+
     return this.getRolePermissionMatrix(companyId, roleId);
   }
 
@@ -204,6 +251,14 @@ export class SecurityService extends BaseRepository {
     }
 
     await this.audit(companyId, actorUserId, 'USER_ROLES_UPDATED', 'User', userId, { roleCount: roleIds.length });
+
+    // Emit event for cache invalidation
+    await emitPermissionChange('user.role.assigned', companyId, {
+      userId: userId,
+      actorUserId: actorUserId,
+      metadata: { roleCount: roleIds.length },
+    });
+
     return this.getUserRoles(companyId, userId);
   }
 
@@ -216,6 +271,14 @@ export class SecurityService extends BaseRepository {
 
     await this.executeNonQuery(`DELETE FROM UserRoles WHERE user_id = @userId AND role_id = @roleId`, { userId, roleId });
     await this.audit(companyId, actorUserId, 'USER_REMOVED', 'UserRole', userId, { roleName: role.role_name });
+    
+    // Emit event for cache invalidation
+    await emitPermissionChange('user.role.removed', companyId, {
+      userId: userId,
+      actorUserId: actorUserId,
+      metadata: { roleName: role.role_name },
+    });
+    
     return this.getUserRoles(companyId, userId);
   }
 
@@ -232,27 +295,41 @@ export class SecurityService extends BaseRepository {
 
   async getEffectivePermissions(companyId: string, userId: string): Promise<EffectivePermission[]> {
     await this.ensureSecuritySeed(companyId);
-    const permissions = await this.getPermissions(companyId);
-    const allowedRows = await this.executeQuery<any>(
-      `SELECT DISTINCT p.module_key, p.action
-       FROM UserRoles ur
-       INNER JOIN RolePermissions rp ON rp.role_id = ur.role_id AND rp.allowed = 1
-       INNER JOIN Permissions p ON p.id = rp.permission_id
-       INNER JOIN Roles r ON r.id = ur.role_id AND r.is_active = 1
-       WHERE ur.user_id = @userId AND r.company_id = @companyId`,
+
+    // Check Redis cache first
+    const cacheKey = `permissions:${companyId}:${userId}`;
+    const cached = await redisCacheService.get<EffectivePermission[]>(cacheKey);
+    if (cached) return cached;
+
+    // Single optimized query that gets all permissions with their allowed status
+    // This eliminates the N+1 query problem
+    const rows = await this.executeQuery<any>(
+      `SELECT p.module_key, p.module_name, p.action,
+              CAST(CASE WHEN EXISTS (
+                SELECT 1 FROM UserRoles ur
+                INNER JOIN Roles r ON r.id = ur.role_id AND r.is_active = 1
+                INNER JOIN RolePermissions rp ON rp.role_id = r.id AND rp.allowed = 1 AND rp.permission_id = p.id
+                WHERE ur.user_id = @userId AND r.company_id = @companyId
+              ) THEN 1 ELSE 0 END AS bit) AS allowed
+       FROM Permissions p
+       ORDER BY p.module_name ASC, p.action ASC`,
       { userId, companyId }
     );
-    const allowedSet = new Set(allowedRows.map((row) => `${row.module_key}:${row.action}`));
 
-    return permissions.map((permission) => ({
-      moduleKey: permission.module_key,
-      moduleName: permission.module_name,
-      action: permission.action,
-      allowed: allowedSet.has(`${permission.module_key}:${permission.action}`),
+    const permissions = rows.map((row) => ({
+      moduleKey: row.module_key,
+      moduleName: row.module_name,
+      action: row.action,
+      allowed: row.allowed,
     }));
+
+    // Cache the result for 5 minutes in Redis
+    await redisCacheService.set(cacheKey, permissions, 5 * 60);
+
+    return permissions;
   }
 
-  async hasPermission(companyId: string, userId: string, legacyRole: string | undefined, moduleKey: string, action: string): Promise<boolean> {
+  async hasPermission(companyId: string, userId: string, _legacyRole: string | undefined, moduleKey: string, action: string): Promise<boolean> {
     await this.ensureSecuritySeed(companyId, userId);
 
     const rows = await this.executeQuery<{ allowed: boolean }>(
@@ -264,14 +341,8 @@ export class SecurityService extends BaseRepository {
        WHERE ur.user_id = @userId AND p.module_key = @moduleKey AND p.action = @action`,
       { companyId, userId, moduleKey, action }
     );
-    if (rows.length > 0) return true;
-
-    if (legacyRole) {
-      const fallbackRole = this.normalizeLegacyRole(legacyRole);
-      if (fallbackRole === SUPER_ADMIN_ROLE) return true;
-    }
-
-    return false;
+    
+    return rows.length > 0;
   }
 
   async getAuditLogs(companyId: string) {
@@ -284,6 +355,18 @@ export class SecurityService extends BaseRepository {
        ORDER BY al.created_at DESC`,
       { companyId }
     );
+  }
+
+  /**
+   * Clear permission cache for a specific company/user
+   * Call this after permission changes
+   */
+  async clearPermissionCache(companyId: string, userId?: string): Promise<void> {
+    if (userId) {
+      await redisCacheService.invalidate(`permissions:${companyId}:${userId}`);
+    } else {
+      await redisCacheService.invalidate(`permissions:${companyId}:*`);
+    }
   }
 
   private async ensureSecuritySchema(): Promise<void> {
@@ -367,6 +450,27 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
 
     for (const statement of statements) {
       await this.executeNonQuery(statement);
+    }
+
+    // Add critical performance indexes
+    const indexStatements = [
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_UserRoles_user_id' AND object_id = OBJECT_ID('UserRoles'))
+       CREATE INDEX IX_UserRoles_user_id ON UserRoles(user_id)`,
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_RolePermissions_role_id' AND object_id = OBJECT_ID('RolePermissions'))
+       CREATE INDEX IX_RolePermissions_role_id ON RolePermissions(role_id)`,
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Permissions_module_key_action' AND object_id = OBJECT_ID('Permissions'))
+       CREATE INDEX IX_Permissions_module_key_action ON Permissions(module_key, action)`,
+      `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_Roles_company_id_is_active' AND object_id = OBJECT_ID('Roles'))
+       CREATE INDEX IX_Roles_company_id_is_active ON Roles(company_id, is_active)`,
+    ];
+
+    for (const statement of indexStatements) {
+      try {
+        await this.executeNonQuery(statement);
+      } catch (error) {
+        // Ignore index creation errors (may already exist)
+        console.warn('Index creation warning:', error);
+      }
     }
 
     SecurityService.schemaEnsured = true;
@@ -486,7 +590,10 @@ CREATE INDEX IX_SecurityAuditLogs_company_created_at ON SecurityAuditLogs(compan
       if (!role) continue;
 
       await this.executeNonQuery(
-        `INSERT INTO UserRoles (user_id, role_id) VALUES (@userId, @roleId)`,
+        `MERGE UserRoles AS target
+         USING (SELECT @userId AS user_id, @roleId AS role_id) AS source
+         ON target.user_id = source.user_id AND target.role_id = source.role_id
+         WHEN NOT MATCHED THEN INSERT (user_id, role_id) VALUES (@userId, @roleId);`,
         { userId: user.id, roleId: role.id }
       );
     }

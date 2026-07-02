@@ -4,7 +4,27 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { connectDB } = require('./config/database');
+import { errorHandler } from './middlewares/errorHandler';
+import { timeoutMiddleware } from './middlewares/timeout';
+
+// Rate limiting middleware for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 attempts
+  message: { success: false, error: 'Too many authentication attempts, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// API rate limiter for general endpoints
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // 100 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Import routes
 const healthRouter = require('./routes/health');
@@ -30,6 +50,16 @@ app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Apply request timeout middleware (30 seconds default)
+app.use(timeoutMiddleware(30000));
+
+// Apply rate limiting - auth endpoints get stricter limits
+app.use('/auth/login', authLimiter);
+app.use('/auth/signup', authLimiter);
+
+// Apply general API rate limiting
+app.use('/api', apiLimiter);
+
 // Mount routes
 app.use('/', healthRouter);
 app.use('/api', healthRouter);
@@ -42,16 +72,7 @@ app.use('/api/navigation', navigationRouter);
 app.use('/api/session', sessionRouter);
 
 // Error handling middleware
-app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-  console.error('Error:', err);
-
-  // Return actual error message for development
-  res.status(500).json({
-    success: false,
-    error: err.message || 'Something went wrong!',
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
-  });
-});
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 4000;
 

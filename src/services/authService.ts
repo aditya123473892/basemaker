@@ -12,7 +12,11 @@ export class AuthService {
   private readonly securityService: SecurityService;
 
   constructor(private authRepository: IAuthRepository) {
-    this.jwtSecret = process.env.JWT_SECRET!;
+    // Validate critical environment variables
+    if (!process.env.JWT_SECRET) {
+      throw new Error('JWT_SECRET environment variable is required');
+    }
+    this.jwtSecret = process.env.JWT_SECRET;
     this.jwtExpiration = (process.env.JWT_EXPIRATION || '24h') as StringValue;
     this.securityService = new SecurityService();
   }
@@ -109,7 +113,10 @@ export class AuthService {
 
   static verifyToken(token: string): { userId: string; companyId: string; role: string } {
     try {
-      const secret = process.env.JWT_SECRET!;
+      const secret = process.env.JWT_SECRET;
+      if (!secret) {
+        throw new Error('JWT_SECRET not configured');
+      }
       return jwt.verify(token, secret) as { userId: string; companyId: string; role: string };
     } catch (error) {
       throw new Error('Invalid token');
